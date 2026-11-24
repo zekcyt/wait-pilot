@@ -62,6 +62,17 @@ def stamp():
     return {"timestamp": now(), "code_version": code_version()}
 
 
+def load_input(path):
+    """An input file that must exist and hold records. Exits with a clear message
+    otherwise, before the slow model load."""
+    recs = load_jsonl(path)
+    if not recs:
+        sys.exit(f"input file {os.path.abspath(path)} is "
+                 f"{'empty' if os.path.exists(path) else 'missing'} "
+                 f"(working directory: {os.getcwd()})")
+    return recs
+
+
 def load_jsonl(path):
     if not os.path.exists(path):
         return []
@@ -501,6 +512,12 @@ def main():
     if args.cmd == "smoke" and args.max_new_tokens == MAX_NEW_TOKENS:
         args.max_new_tokens = 4096          # keep the smoke test short
 
+    if args.cmd == "branch":             # check inputs before the slow model load
+        forks = load_input(args.forks)
+        if args.max_forks:
+            forks = forks[:args.max_forks]
+        bases = {(r["unique_id"], r["seed"]): r for r in load_input(args.baselines)}
+
     tok = load_tokenizer(args.model)
     ban = MarkerBan(tok)
     engine = Engine(tok, ban, args.model, args.ban_impl,
@@ -513,10 +530,6 @@ def main():
         run_baseline(engine, tok, problems, seeds, args.out, args.max_new_tokens,
                      args.chunk, args.model)
     elif args.cmd == "branch":
-        forks = load_jsonl(args.forks)
-        if args.max_forks:
-            forks = forks[:args.max_forks]
-        bases = {(r["unique_id"], r["seed"]): r for r in load_jsonl(args.baselines)}
         run_branch(engine, tok, forks, bases, args.out, args.k, args.window_frac,
                    args.max_new_tokens, args.chunk)
     else:

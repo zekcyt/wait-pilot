@@ -29,7 +29,8 @@ from common import (DEFAULT_MODEL, PROBE_MAX_TOKENS, PROBE_SUFFIX, THINK_END, Ma
                     find_marker_positions, next_sentence_end, paragraph_break_ids)
 from grading import answers_equal, grade_answers, probe_answer
 
-from cloud_generate import (Engine, Req, append_jsonl, chunks, load_jsonl, load_tokenizer,
+from cloud_generate import (Engine, Req, append_jsonl, chunks, load_input, load_jsonl,
+                            load_tokenizer,
                             stable_seed, stamp)
 
 
@@ -288,17 +289,22 @@ def main():
         threshold_report(args.path, args.cut, args.min_share)
         return
 
+    # Check inputs before the slow model load.
+    bases = load_input(args.baselines)
+    if args.cmd == "branch":
+        forks = {f["fork_id"]: f for f in load_input(args.forks)}
+        branches = load_input(args.branches)
+
     tok = load_tokenizer(args.model)
     engine = Engine(tok, MarkerBan(tok), args.model, args.ban_impl,
                     gpu_memory_utilization=args.gpu_mem)
     if args.cmd == "forks":
-        run_forks(engine, tok, load_jsonl(args.baselines), args.out, args.forks_per_trace,
-                  args.probes, args.chunk)
+        run_forks(engine, tok, bases, args.out, args.forks_per_trace, args.probes,
+                  args.chunk)
     else:
-        forks = {f["fork_id"]: f for f in load_jsonl(args.forks)}
-        bases = {(r["unique_id"], r["seed"]): r for r in load_jsonl(args.baselines)}
-        run_branch_probes(engine, tok, load_jsonl(args.branches), forks, bases, args.out,
-                          args.probes, args.max_breaks, args.chunk)
+        bases = {(r["unique_id"], r["seed"]): r for r in bases}
+        run_branch_probes(engine, tok, branches, forks, bases, args.out, args.probes,
+                          args.max_breaks, args.chunk)
 
 
 if __name__ == "__main__":
