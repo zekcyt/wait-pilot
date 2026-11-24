@@ -104,24 +104,36 @@ class Res:
 
 
 class Engine:
-    """Thin wrapper around vllm.LLM so the rest of the code does not depend on its API."""
+    """Thin wrapper around vllm.LLM so the rest of the code does not depend on its API.
 
-    def __init__(self, tok, ban, model=DEFAULT_MODEL, ban_impl="processor",
-                 max_model_len=MAX_NEW_TOKENS + 1024, gpu_memory_utilization=0.92):
+    The marker ban uses vLLM's bad-words mechanism, which sets a token to -inf when the
+    tokens before it complete a banned sequence:
+      ids    (default) the exact common.MarkerBan rule as token-ID sequences: every
+             single marker ID, plus [prefix, m-run] for "H"+"mmm"-style splits. It sets
+             SamplingParams._bad_words_token_ids, which vLLM normally fills from bad_words
+             strings (checked against vLLM 0.34).
+      words  public bad_words strings + logit_bias. Covers the usual spellings but not
+             every split (78 of 117 split pairs for this tokenizer).
+    Either way, check_ban() runs at start-up and stops the run if the ban has no effect.
+    """
+
+    def __init__(self, tok, ban, model=DEFAULT_MODEL, ban_impl="ids",
+                 max_model_len=MAX_NEW_TOKENS + 1024, gpu_memory_utilization=0.92,
+                 check=True):
+        # Room for all banned sequences (vLLM caps the number of bad words).
+        os.environ.setdefault("VLLM_MAX_NUM_BAD_WORDS", "1024")
         import vllm
         self.vllm_version = vllm.__version__
         self.tok, self.ban, self.ban_impl = tok, ban, ban_impl
-        kwargs = dict(model=model, dtype="bfloat16", max_model_len=max_model_len,
-                      gpu_memory_utilization=gpu_memory_utilization,
-                      enable_prefix_caching=True, seed=0)
-        if ban_impl == "processor":
-            from vllm_ban import MarkerBanProcessor
-            if MarkerBanProcessor is None:
-                sys.exit(f"vLLM {vllm.__version__} has no AdapterLogitsProcessor. "
-                         f"Use --ban-impl bias, and check the smoke test for leaks.")
-            kwargs["logits_processors"] = [MarkerBanProcessor]
-        self.llm = vllm.LLM(**kwargs)
+        self.bad_ids = ([[i] for i in ban.single_ids]
+                        + [[p, m] for p in ban.seq_prefix_ids for m in ban.seq_next_ids])
+        self.bad_words = vllm_bad_words(tok, ban)
+        self.llm = vllm.LLM(model=model, dtype="bfloat16", max_model_len=max_model_len,
+                            gpu_memory_utilization=gpu_memory_utilization,
+                            enable_prefix_caching=True, seed=0)
         self.eos_id = tok.eos_token_id
+        if check:
+            self.check_ban()
 
     def _params(self, r):
         from vllm import SamplingParams
@@ -129,21 +141,61 @@ class Engine:
                   max_tokens=r.max_tokens, seed=r.seed, skip_special_tokens=False)
         if r.logprobs:
             kw["logprobs"] = r.logprobs
-        if r.ban:
-            if self.ban_impl == "processor":
-                kw["extra_args"] = {"marker_ban": {
-                    "single": self.ban.single_ids, "prefix": self.ban.seq_prefix_ids,
-                    "next": self.ban.seq_next_ids, "prev0": r.prompt_ids[-1]}}
-            else:
-                kw["logit_bias"] = {i: -100.0 for i in self.ban.single_ids}
-                kw["bad_words"] = ["Hmmm", "hmmm", "hmm", "Hmmmm", "hmmmm"]
-        return SamplingParams(**kw)
+        if r.ban and self.ban_impl == "words":
+            kw["logit_bias"] = {i: -100.0 for i in self.ban.single_ids}
+            kw["bad_words"] = self.bad_words
+        sp = SamplingParams(**kw)
+        if r.ban and self.ban_impl == "ids":
+            sp._bad_words_token_ids = [list(s) for s in self.bad_ids]
+        return sp
 
-    def run(self, reqs):
+    def check_ban(self):
+        """Greedy, deterministic check that the ban changes the output. Prompts are
+        built so the unbanned model's next tokens are a marker ("Wait") or a split
+        "H"+"mmm". With the ban on, neither may appear. Exits if the ban fails."""
+        tok, ban = self.tok, self.ban
+        cases = {
+            "single": tok.encode("Wait, Wait, Wait, Wait, Wait, Wait, Wait,",
+                                 add_special_tokens=False),
+            "split": tok.encode("Hmmm Hmmm Hmmm Hmmm Hmmm Hmmm Hmmm",
+                                add_special_tokens=False),
+        }
+        reqs = []
+        for name, ids in cases.items():
+            for banned in (False, True):
+                reqs.append(Req(ids, 2, 0, ban=banned, temperature=0.0, top_p=1.0,
+                                tag=(name, banned)))
+        out = {r.req.tag: r.token_ids for r in self.run(reqs, progress=False)}
+        single, nxt, pre = set(ban.single_ids), set(ban.seq_next_ids), set(ban.seq_prefix_ids)
+
+        def has_marker(ids):
+            if any(t in single for t in ids):
+                return True
+            return any(a in pre and b in nxt for a, b in zip(ids, ids[1:]))
+
+        ok, lines = True, []
+        for name in cases:
+            free, banned = out[(name, False)], out[(name, True)]
+            show = lambda ids: [tok.decode([t]) for t in ids]   # noqa: E731
+            lines.append(f"  {name:<6} free -> {show(free)}   banned -> {show(banned)}")
+            if has_marker(banned):
+                ok = False
+            if not has_marker(free):
+                lines.append(f"  ({name}: the free run had no marker, so this case "
+                             f"does not test the ban)")
+        print(f"ban check (vLLM {self.vllm_version}, --ban-impl {self.ban_impl}):")
+        print("\n".join(lines))
+        if not ok:
+            sys.exit("BAN CHECK FAILED: a banned run produced a marker. Do not run the "
+                     "experiment with this setting. Try the other --ban-impl.")
+        print("ban check passed\n")
+
+    def run(self, reqs, progress=True):
         if not reqs:
             return []
-        prompts = [{"prompt_token_ids": list(r.prompt_ids)} for r in reqs]
-        outs = self.llm.generate(prompts, [self._params(r) for r in reqs], use_tqdm=True)
+        prompts = [{"prompt_token_ids": [int(t) for t in r.prompt_ids]} for r in reqs]
+        outs = self.llm.generate(prompts, [self._params(r) for r in reqs],
+                                 use_tqdm=progress)
         res = []
         for r, o in zip(reqs, outs):
             c = o.outputs[0]
@@ -152,6 +204,22 @@ class Engine:
                 lps.append({int(k): float(v.logprob) for k, v in step.items()})
             res.append(Res(r, list(c.token_ids), c.finish_reason or "", lps))
         return res
+
+
+def vllm_bad_words(tok, ban):
+    """bad_words strings for --ban-impl words: every prefix+m-run spelling whose vLLM
+    tokenization (word, and ' '+word) ends in a banned [prefix, m-run] pair."""
+    want = {(p, m) for p in ban.seq_prefix_ids for m in ban.seq_next_ids}
+    words = []
+    for p in ban.seq_prefix_ids:
+        for m in ban.seq_next_ids:
+            w = (tok.decode([p]) + tok.decode([m])).lstrip()
+            for variant in (w, " " + w):
+                ids = tok.encode(variant, add_special_tokens=False)
+                if len(ids) >= 2 and (ids[-2], ids[-1]) in want:
+                    words.append(w)
+                    break
+    return sorted(set(words))
 
 
 def gpu_name():
@@ -173,8 +241,13 @@ def decode(tok, ids):
 
 
 def prompt_ids_for(tok, problem):
-    return tok.apply_chat_template(user_message(problem), add_generation_prompt=True,
-                                   tokenize=True)
+    """Prompt token IDs as a plain list of ints. Newer transformers return a dict
+    (BatchEncoding) from apply_chat_template, older ones a list."""
+    out = tok.apply_chat_template(user_message(problem), add_generation_prompt=True,
+                                  tokenize=True)
+    if hasattr(out, "keys"):
+        out = out["input_ids"]
+    return [int(t) for t in out]
 
 
 # --- baseline ----------------------------------------------------------------------------
@@ -397,7 +470,7 @@ def main():
     def common_args(sp):
         sp.add_argument("--model", default=DEFAULT_MODEL)
         sp.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
-        sp.add_argument("--ban-impl", choices=["processor", "bias"], default="processor")
+        sp.add_argument("--ban-impl", choices=["ids", "words"], default="ids")
         sp.add_argument("--gpu-mem", type=float, default=0.92)
         sp.add_argument("--chunk", type=int, default=512,
                         help="requests per vLLM call (results are saved after each)")

@@ -39,7 +39,6 @@ whether it was truncated, and marker and substitute-phrase counts.
 | `grading.py` | answer grading: every box in the final section, sets vs ordered tuples, math-verify |
 | `regrade.py` | regrades any records file offline with `grading.py` |
 | `cloud_generate.py` | vLLM main run: baselines, branches (free / banned arms, ban windows), smoke test |
-| `vllm_ban.py` | the marker ban as a vLLM per-request logits processor |
 | `probes.py` | forced-answer probes: fork state s, threshold check, probes along branches |
 | `summarize.py` | accuracy, truncation, marker counts, paired comparison, leak check |
 | `inspect_records.py` | readable side-by-side view of each problem for manual review |
@@ -95,8 +94,9 @@ python probes.py branch --branches runs/branches.jsonl --forks runs/forks.jsonl 
 ```
 
 Every step resumes where it stopped. Token IDs are saved with every record, so fork
-prefixes are rebuilt exactly. If the vLLM version lacks the logits-processor API, add
-`--ban-impl bias` and check the smoke test's leak count.
+prefixes are rebuilt exactly. Every command starts with a greedy ban check and stops if
+the ban has no effect. The default `--ban-impl ids` passes the exact ban rule to vLLM as
+token sequences; `--ban-impl words` is a fallback that misses some split spellings.
 
 ## Usage
 
@@ -146,6 +146,5 @@ run with a large token cap.
 
 ## Status of the cloud code
 
-`cloud_generate.py`, `probes.py` and `vllm_ban.py` were dry-run locally with a fake engine
-(no vLLM on Windows). They have not run under real vLLM yet: the smoke test on the pod is
-the first real check.
+`cloud_generate.py` and `probes.py` were dry-run locally with a fake engine (no vLLM on
+Windows). The smoke test on the pod is the real check.

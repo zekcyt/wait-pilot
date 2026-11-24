@@ -255,7 +255,7 @@ def main():
 
     def engine_args(sp):
         sp.add_argument("--model", default=DEFAULT_MODEL)
-        sp.add_argument("--ban-impl", choices=["processor", "bias"], default="processor")
+        sp.add_argument("--ban-impl", choices=["ids", "words"], default="ids")
         sp.add_argument("--gpu-mem", type=float, default=0.92)
         sp.add_argument("--chunk", type=int, default=256)
 
