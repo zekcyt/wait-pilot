@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from common import (DEFAULT_MODEL, MAX_NEW_TOKENS, TEMPERATURE, THINK_END, TOP_P,
-                    MarkerBan, count_markers, count_substitutes, load_problems,
+                    MarkerBan, code_version, count_markers, count_substitutes, load_problems,
                     next_sentence_end, split_thinking, truncation_phase, user_message)
 from grading import grade_output
 
@@ -55,6 +55,11 @@ def stable_seed(*parts):
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def stamp():
+    """Time and code version, added to every record."""
+    return {"timestamp": now(), "code_version": code_version()}
 
 
 def load_jsonl(path):
@@ -213,7 +218,7 @@ def run_baseline(engine, tok, problems, seeds, out, max_new_tokens, chunk, model
                 "model": model, "precision": "bf16", "engine": f"vllm {engine.vllm_version}",
                 "gpu": gpu, "max_new_tokens": max_new_tokens,
                 "temperature": TEMPERATURE, "top_p": TOP_P, "top_k": None,
-                "timestamp": now(),
+                **stamp(),
                 "output": text,
                 "prompt_token_ids": list(res.req.prompt_ids),
                 "output_token_ids": res.token_ids,
@@ -266,7 +271,7 @@ def branch_record(tok, fork, base, arm, window, k, seed, cont_ids, finish, stage
         "marker_counts": count_markers(thinking),
         "substitute_counts": count_substitutes(thinking),
         "engine": f"vllm {engine.vllm_version}", "ban_impl": engine.ban_impl,
-        "max_new_tokens": max_new_tokens, "timestamp": now(),
+        "max_new_tokens": max_new_tokens, **stamp(),
         "output": text,
         "continuation_token_ids": cont_ids,
     }

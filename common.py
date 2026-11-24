@@ -11,8 +11,30 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 # DeepSeek's recommended instruction for math with the R1 distills (no system prompt).
 PROMPT_SUFFIX = "Please reason step by step, and put your final answer within \\boxed{}."
 TEMPERATURE, TOP_P = 0.6, 0.95          # top_k off
-MAX_NEW_TOKENS = 16384                  # main-run token cap
+MAX_NEW_TOKENS = 16000                  # main-run token cap (preregistration: 16,000)
 THINK_END = "</think>"
+
+_CODE_VERSION = None
+
+
+def code_version():
+    """Git commit of this code, with '+dirty' if there are uncommitted changes to
+    tracked files. Saved in every record so results trace back to exact code."""
+    global _CODE_VERSION
+    if _CODE_VERSION is None:
+        import os
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            def git(*a):
+                return subprocess.run(["git", *a], cwd=here, capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            sha = git("rev-parse", "HEAD")
+            dirty = git("status", "--porcelain", "--untracked-files=no")
+            _CODE_VERSION = sha + ("+dirty" if dirty else "")
+        except Exception:
+            _CODE_VERSION = "unknown"
+    return _CODE_VERSION
 
 # Forced-answer probe (design doc, Measurement): appended to a prefix, then a short
 # answer is sampled. Fixed before the main run; changing it changes the state s.

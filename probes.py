@@ -30,7 +30,7 @@ from common import (DEFAULT_MODEL, PROBE_MAX_TOKENS, PROBE_SUFFIX, THINK_END, Ma
 from grading import answers_equal, grade_answers, probe_answer
 
 from cloud_generate import (Engine, Req, append_jsonl, chunks, load_jsonl, load_tokenizer,
-                            now, stable_seed)
+                            stable_seed, stamp)
 
 
 def select_forks(markers, n_forks, key):
@@ -139,7 +139,7 @@ def run_forks(engine, tok, bases, out, n_forks, n_probes, chunk):
                 "baseline_correct": b["correct"], "baseline_truncated": b["truncated"],
                 "baseline_truncation_phase": b.get("truncation_phase"),
                 "baseline_n_tokens": b["n_tokens"],
-                "engine": f"vllm {engine.vllm_version}", "timestamp": now(),
+                "engine": f"vllm {engine.vllm_version}", **stamp(),
             })
         append_jsonl(out, recs)
         print(f"  chunk: {len(recs)} forks probed in {time.time() - t0:.0f}s")
@@ -239,7 +239,7 @@ def run_branch_probes(engine, tok, branches, forks, bases, out, n_probes, max_br
                 "recovered": (not fork_correct) and bool(br["correct"]),
                 "final_correct": br["correct"],
                 "probe_trail": trail,                 # [break position, share correct]
-                "n_probes_per_break": n_probes, "timestamp": now(),
+                "n_probes_per_break": n_probes, **stamp(),
             })
         append_jsonl(out, recs)
         print(f"  chunk: {len(recs)} branches probed in {time.time() - t0:.0f}s")

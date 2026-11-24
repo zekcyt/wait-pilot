@@ -21,7 +21,7 @@ Calibration on harder problems, opening paragraph left alone, 2 seeds:
         --seeds 0,1 --suppress-from paragraph --out outputs/calib_l45_para.jsonl
 
 Cloud, 24 GB GPU, BF16:
-    python pilot.py --limit 500 --max-new-tokens 16384
+    python pilot.py --limit 500 --max-new-tokens 16000
 """
 import argparse
 import json
@@ -30,7 +30,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from common import (DEFAULT_MODEL, TEMPERATURE, TOP_P, MarkerBan, count_markers, count_substitutes, load_problems,
+from common import (DEFAULT_MODEL, TEMPERATURE, TOP_P, MarkerBan, code_version, count_markers, count_substitutes, load_problems,
                     paragraph_break_ids, split_thinking, truncation_phase, user_message)
 from grading import grade_output
 
@@ -289,6 +289,7 @@ def main():
             "top_p": TOP_P,
             "top_k": None,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "code_version": code_version(),
             "output": text,
             **ids,
         }
