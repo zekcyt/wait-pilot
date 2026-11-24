@@ -6,11 +6,10 @@ summarize.py - quick look at outputs/pilot_records.jsonl.
 """
 import argparse
 import json
-import re
 import sys
 from collections import defaultdict
 
-MARKER_RE = re.compile(r"\b(?:[Ww]ait|[Hh]m{2,}|[Aa]ctually)\b")
+from common import MARKER_RE   # same pattern pilot.py and the cloud pipeline count with
 
 
 def load(path):

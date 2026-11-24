@@ -34,7 +34,13 @@ whether it was truncated, and marker and substitute-phrase counts.
 
 | File | Purpose |
 |---|---|
-| `pilot.py` | runs the experiment and writes records to a `.jsonl` file |
+| `pilot.py` | local (Hugging Face) experiment; writes records to a `.jsonl` file |
+| `common.py` | shared settings, marker ban (incl. split spellings like "H"+"mmm"), fork detection |
+| `grading.py` | answer grading: every box in the final section, sets vs ordered tuples, math-verify |
+| `regrade.py` | regrades any records file offline with `grading.py` |
+| `cloud_generate.py` | vLLM main run: baselines, branches (free / banned arms, ban windows), smoke test |
+| `vllm_ban.py` | the marker ban as a vLLM per-request logits processor |
+| `probes.py` | forced-answer probes: fork state s, threshold check, probes along branches |
 | `summarize.py` | accuracy, truncation, marker counts, paired comparison, leak check |
 | `inspect_records.py` | readable side-by-side view of each problem for manual review |
 | `smoke_test.py` | one-prompt check that the model loads and generates |
@@ -68,11 +74,29 @@ python pilot.py --model F:/models/r1-distill-llama-8b-nf4 --limit 5
 Edit `DST` in `save_4bit.py` to choose where the copy goes. Local runs are for checking the
 pipeline. Use full precision for real numbers.
 
-### Cloud, 24 GB or larger GPU (BF16)
+### Cloud main run (vLLM, BF16, A100 80GB)
+
+The main run follows the design doc and `docs/preregistration.md`. On the pod:
 
 ```bash
-python pilot.py --limit 500 --max-new-tokens 16384 --suppress-from paragraph
+python -m pip install -r requirements-cloud.txt
+python cloud_generate.py smoke                         # must print SMOKE TEST PASSED
+
+# threshold pilot batch: baselines + fork probes only, no branches
+python cloud_generate.py baseline --limit 100 --stratify --seeds 0 --out runs/pilot_baselines.jsonl
+python probes.py forks --baselines runs/pilot_baselines.jsonl --out runs/pilot_forks.jsonl
+python probes.py threshold runs/pilot_forks.jsonl      # fork counts per group, no effects
+
+# after locking the threshold and tagging preregistration v2:
+python cloud_generate.py baseline --seeds 0,1 --out runs/baselines.jsonl
+python probes.py forks --baselines runs/baselines.jsonl --out runs/forks.jsonl
+python cloud_generate.py branch --forks runs/forks.jsonl --baselines runs/baselines.jsonl --out runs/branches.jsonl
+python probes.py branch --branches runs/branches.jsonl --forks runs/forks.jsonl --baselines runs/baselines.jsonl --out runs/branch_probes.jsonl
 ```
+
+Every step resumes where it stopped. Token IDs are saved with every record, so fork
+prefixes are rebuilt exactly. If the vLLM version lacks the logits-processor API, add
+`--ban-impl bias` and check the smoke test's leak count.
 
 ## Usage
 
@@ -108,9 +132,10 @@ An output file can only hold records made with the same model, token cap and
 - Truncated runs have no final answer, so judge accuracy on finished runs.
 - `substitute_counts` tracks phrases like "Alternatively" and "Let me check", to see whether
   the model re-checks with different words once the markers are banned.
-- The built-in grader is deliberately strict (string and simple-number matching) and can
-  mark equivalent forms such as `\frac{\sqrt2}{2}` and `\frac{1}{\sqrt2}` as wrong. Raw
-  outputs are saved so everything can be regraded later.
+- Grading (`grading.py`) parses every `\boxed{}` in the final section. A gold comma list
+  such as `-2,1` is compared as a set, so `\boxed{1}, \boxed{-2}` is correct; bracketed
+  answers such as `(3, \frac{\pi}{2})` keep their order. Equivalence uses math-verify.
+  Records made before this grader can be regraded with `regrade.py`.
 
 ## Notes on local runs
 
@@ -119,9 +144,8 @@ runs slow down sharply near 3,000 tokens, and most hard-problem runs are truncat
 Easy problems finish in 1-3 minutes. Quantitative results should come from the full-precision
 run with a large token cap.
 
-## Planned
+## Status of the cloud code
 
-- vLLM-based generation for the cloud run
-- regrading with a math-equivalence checker
-- force-answer probes: when the correct answer first appears in the reasoning, how long the
-  model keeps checking afterwards, and whether wrong answers get corrected
+`cloud_generate.py`, `probes.py` and `vllm_ban.py` were dry-run locally with a fake engine
+(no vLLM on Windows). They have not run under real vLLM yet: the smoke test on the pod is
+the first real check.

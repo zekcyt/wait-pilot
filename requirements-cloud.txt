@@ -1,0 +1,8 @@
+# Cloud pod (Linux, CUDA GPU). vLLM brings its own matching PyTorch.
+# Record the exact vLLM version in the run log: the logits-processor API changes
+# between releases (vllm_ban.py targets AdapterLogitsProcessor, vLLM 0.11+).
+vllm>=0.11
+transformers
+datasets
+huggingface_hub
+math-verify
