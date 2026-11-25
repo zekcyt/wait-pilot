@@ -20,7 +20,7 @@ import logging
 import os
 import re
 
-from common import split_thinking
+from waitpilot.common import split_thinking
 
 try:
     from math_verify import parse as _mv_parse, verify as _mv_verify

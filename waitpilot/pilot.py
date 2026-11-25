@@ -4,24 +4,24 @@ pilot.py - "Wait"-marker suppression pilot on MATH-500.
 Each problem is solved twice with the same sampling seed:
   baseline  - normal generation
   suppress  - marker tokens ("Wait", "Hmm", "Actually", ...) banned at every step
-One JSON line per (problem, condition, seed) goes to outputs/pilot_records.jsonl.
+One JSON line per (problem, condition, seed) goes to runs/calibration/pilot_records.jsonl.
 Re-running the same command resumes: finished records are skipped.
 
 Step 0 - check the marker tokens and the split-spelling rule (no GPU needed):
-    python pilot.py --scan-markers
+    python -m waitpilot.pilot --scan-markers
 
 Local, RTX 3070 (pre-quantized 4-bit copy):
-    python pilot.py --model F:/models/r1-distill-llama-8b-nf4 --limit 5 --max-new-tokens 3072
+    python -m waitpilot.pilot --model F:/models/r1-distill-llama-8b-nf4 --limit 5 --max-new-tokens 3072
 
 Local, quantize on the fly:
-    python pilot.py --quantize 4bit --limit 5
+    python -m waitpilot.pilot --quantize 4bit --limit 5
 
 Calibration on harder problems, opening paragraph left alone, 2 seeds:
-    python pilot.py --model F:/models/r1-distill-llama-8b-nf4 --levels 4,5 --limit 15 \
-        --seeds 0,1 --suppress-from paragraph --out outputs/calib_l45_para.jsonl
+    python -m waitpilot.pilot --model F:/models/r1-distill-llama-8b-nf4 --levels 4,5 --limit 15 \
+        --seeds 0,1 --suppress-from paragraph --out runs/calibration/calib_l45_para.jsonl
 
 Cloud, 24 GB GPU, BF16:
-    python pilot.py --limit 500 --max-new-tokens 16000
+    python -m waitpilot.pilot --limit 500 --max-new-tokens 16000
 """
 import argparse
 import json
@@ -30,9 +30,11 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from common import (DEFAULT_MODEL, TEMPERATURE, TOP_P, MarkerBan, code_version, count_markers, count_substitutes, load_problems,
-                    paragraph_break_ids, split_thinking, truncation_phase, user_message)
-from grading import grade_output
+from waitpilot.common import (DEFAULT_MODEL, TEMPERATURE, TOP_P, MarkerBan, code_version,
+                              count_markers, count_substitutes, load_problems,
+                              paragraph_break_ids, split_thinking, truncation_phase,
+                              user_message)
+from waitpilot.grading import grade_output
 
 
 def load_model(args):
@@ -209,7 +211,7 @@ def main():
                         "only after the opening paragraph, so paired runs share it.")
     p.add_argument("--levels", default="",
                    help="only these MATH difficulty levels, e.g. 4,5 (default: all)")
-    p.add_argument("--out", default="outputs/pilot_records.jsonl")
+    p.add_argument("--out", default="runs/calibration/pilot_records.jsonl")
     p.add_argument("--scan-markers", action="store_true",
                    help="print the marker token IDs and exit (tokenizer only)")
     args = p.parse_args()

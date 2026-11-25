@@ -16,17 +16,17 @@ Two stages, each resumable (finished records are skipped on re-run):
             The forced-"Wait" arm is not run (preregistration v1, Settings).
 
 Typical order on the pod (see README):
-    python cloud_generate.py baseline --limit 100 --stratify --seeds 0 --out runs/pilot_baselines.jsonl
-    python probes.py forks --baselines runs/pilot_baselines.jsonl --out runs/pilot_forks.jsonl
-    python probes.py threshold runs/pilot_forks.jsonl
+    python -m waitpilot.cloud_generate baseline --limit 100 --stratify --seeds 0 --out runs/pilot/pilot_baselines.jsonl
+    python -m waitpilot.probes forks --baselines runs/pilot/pilot_baselines.jsonl --out runs/pilot/pilot_forks.jsonl
+    python -m waitpilot.probes threshold runs/pilot/pilot_forks.jsonl
     # lock the threshold, tag preregistration v2, then the main run:
-    python cloud_generate.py baseline --seeds 0,1 --out runs/baselines.jsonl
-    python probes.py forks --baselines runs/baselines.jsonl --out runs/forks.jsonl
-    python cloud_generate.py branch --forks runs/forks.jsonl --baselines runs/baselines.jsonl --out runs/branches.jsonl
-    python probes.py branch --branches runs/branches.jsonl --forks runs/forks.jsonl --out runs/branch_probes.jsonl
+    python -m waitpilot.cloud_generate baseline --seeds 0,1 --out runs/main/baselines.jsonl
+    python -m waitpilot.probes forks --baselines runs/main/baselines.jsonl --out runs/main/forks.jsonl
+    python -m waitpilot.cloud_generate branch --forks runs/main/forks.jsonl --baselines runs/main/baselines.jsonl --out runs/main/branches.jsonl
+    python -m waitpilot.probes branch --branches runs/main/branches.jsonl --forks runs/main/forks.jsonl --out runs/main/branch_probes.jsonl
 
 Smoke test (a handful of traces, checks grading, the ban and speed):
-    python cloud_generate.py smoke
+    python -m waitpilot.cloud_generate smoke
 """
 import argparse
 import json
@@ -37,10 +37,10 @@ import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from common import (DEFAULT_MODEL, MAX_NEW_TOKENS, TEMPERATURE, THINK_END, TOP_P,
+from waitpilot.common import (DEFAULT_MODEL, MAX_NEW_TOKENS, TEMPERATURE, THINK_END, TOP_P,
                     MarkerBan, code_version, count_markers, count_substitutes, load_problems,
                     next_sentence_end, split_thinking, truncation_phase, user_message)
-from grading import grade_output
+from waitpilot.grading import grade_output
 
 # A re-check "follows" a fork if a marker or substitute phrase appears in this many
 # characters of the continuation. Provisional definition; fix it in preregistration v2.
@@ -70,6 +70,14 @@ def load_input(path):
         sys.exit(f"input file {os.path.abspath(path)} is "
                  f"{'empty' if os.path.exists(path) else 'missing'} "
                  f"(working directory: {os.getcwd()})")
+    return recs
+
+
+def load_inputs(paths):
+    """Several required input files, comma-separated (e.g. marker and placebo forks)."""
+    recs = []
+    for p in paths.split(","):
+        recs += load_input(p.strip())
     return recs
 
 
@@ -104,6 +112,7 @@ class Req:
     top_p: float = TOP_P
     logprobs: int = 0
     tag: object = None                  # caller's bookkeeping, passed through
+    ban_ids: list = None                # ban these IDs instead of the markers (placebo)
 
 
 @dataclass
@@ -130,12 +139,14 @@ class Engine:
 
     def __init__(self, tok, ban, model=DEFAULT_MODEL, ban_impl="ids",
                  max_model_len=MAX_NEW_TOKENS + 1024, gpu_memory_utilization=0.92,
-                 check=True):
+                 check=True, log_path=None):
         # Room for all banned sequences (vLLM caps the number of bad words).
         os.environ.setdefault("VLLM_MAX_NUM_BAD_WORDS", "1024")
+        t0 = time.time()
         import vllm
         self.vllm_version = vllm.__version__
         self.tok, self.ban, self.ban_impl = tok, ban, ban_impl
+        self.log_path = log_path
         self.bad_ids = ([[i] for i in ban.single_ids]
                         + [[p, m] for p in ban.seq_prefix_ids for m in ban.seq_next_ids])
         self.bad_words = vllm_bad_words(tok, ban)
@@ -143,8 +154,19 @@ class Engine:
                             gpu_memory_utilization=gpu_memory_utilization,
                             enable_prefix_caching=True, seed=0)
         self.eos_id = tok.eos_token_id
+        self.log("engine_start", seconds=round(time.time() - t0, 1))
         if check:
             self.check_ban()
+
+    def log(self, event, **fields):
+        """Append one line to the timing log (no-op without a log path). Every vLLM
+        call is logged, so GPU time and speed survive a lost terminal."""
+        if not self.log_path:
+            return
+        append_jsonl(self.log_path, [{
+            "event": event, **fields, "command": " ".join(sys.argv),
+            "engine": f"vllm {self.vllm_version}", "ban_impl": self.ban_impl,
+            "gpu": gpu_name(), **stamp()}])
 
     def _params(self, r):
         from vllm import SamplingParams
@@ -152,12 +174,16 @@ class Engine:
                   max_tokens=r.max_tokens, seed=r.seed, skip_special_tokens=False)
         if r.logprobs:
             kw["logprobs"] = r.logprobs
-        if r.ban and self.ban_impl == "words":
+        if r.ban and r.ban_ids:             # placebo: ban one ordinary word's IDs
+            if self.ban_impl == "words":
+                kw["logit_bias"] = {int(i): -100.0 for i in r.ban_ids}
+        elif r.ban and self.ban_impl == "words":
             kw["logit_bias"] = {i: -100.0 for i in self.ban.single_ids}
             kw["bad_words"] = self.bad_words
         sp = SamplingParams(**kw)
         if r.ban and self.ban_impl == "ids":
-            sp._bad_words_token_ids = [list(s) for s in self.bad_ids]
+            sp._bad_words_token_ids = ([[int(i)] for i in r.ban_ids] if r.ban_ids
+                                       else [list(s) for s in self.bad_ids])
         return sp
 
     def check_ban(self):
@@ -176,7 +202,8 @@ class Engine:
             for banned in (False, True):
                 reqs.append(Req(ids, 2, 0, ban=banned, temperature=0.0, top_p=1.0,
                                 tag=(name, banned)))
-        out = {r.req.tag: r.token_ids for r in self.run(reqs, progress=False)}
+        out = {r.req.tag: r.token_ids
+               for r in self.run(reqs, progress=False, stage="ban_check")}
         single, nxt, pre = set(ban.single_ids), set(ban.seq_next_ids), set(ban.seq_prefix_ids)
 
         def has_marker(ids):
@@ -201,12 +228,14 @@ class Engine:
                      "experiment with this setting. Try the other --ban-impl.")
         print("ban check passed\n")
 
-    def run(self, reqs, progress=True):
+    def run(self, reqs, progress=True, stage="generate"):
         if not reqs:
             return []
         prompts = [{"prompt_token_ids": [int(t) for t in r.prompt_ids]} for r in reqs]
+        t0 = time.time()
         outs = self.llm.generate(prompts, [self._params(r) for r in reqs],
                                  use_tqdm=progress)
+        elapsed = time.time() - t0
         res = []
         for r, o in zip(reqs, outs):
             c = o.outputs[0]
@@ -214,6 +243,12 @@ class Engine:
             for step in (c.logprobs or []):
                 lps.append({int(k): float(v.logprob) for k, v in step.items()})
             res.append(Res(r, list(c.token_ids), c.finish_reason or "", lps))
+        out_toks = sum(len(x.token_ids) for x in res)
+        self.log("generate", stage=stage, n_requests=len(reqs),
+                 n_banned=sum(r.ban for r in reqs),
+                 prompt_tokens=sum(len(p["prompt_token_ids"]) for p in prompts),
+                 output_tokens=out_toks, seconds=round(elapsed, 2),
+                 output_tok_per_s=round(out_toks / elapsed, 1) if elapsed else None)
         return res
 
 
@@ -276,7 +311,7 @@ def run_baseline(engine, tok, problems, seeds, out, max_new_tokens, chunk, model
             reqs.append(Req(pids, max_new_tokens, stable_seed("baseline", row["unique_id"], s),
                             tag=(row, s)))
         t0 = time.time()
-        results = engine.run(reqs)
+        results = engine.run(reqs, stage="baseline")
         elapsed = time.time() - t0
         recs = []
         for res in results:
@@ -318,10 +353,16 @@ def run_baseline(engine, tok, problems, seeds, out, max_new_tokens, chunk, model
 # --- branch --------------------------------------------------------------------------------
 
 def arms_for(fork, window_frac):
-    arms = [("free", "none"), ("ban", "rest")]
-    # Deterministic subset of forks for the extra windows.
+    """Marker forks: free, ban for the rest of the trace, ban for one token (every fork,
+    so it pairs with the placebo), and ban for one sentence on a subset (--window-frac).
+    Placebo forks: free and a one-token ban of the placebo word, the same intervention
+    as the marker one-token arm."""
+    if fork.get("is_placebo"):
+        return [("free", "none"), ("ban", "token")]
+    arms = [("free", "none"), ("ban", "rest"), ("ban", "token")]
+    # Deterministic subset of forks for the sentence window.
     if (stable_seed("window", fork["fork_id"]) % 10_000) / 10_000 < window_frac:
-        arms += [("ban", "token"), ("ban", "sentence")]
+        arms.append(("ban", "sentence"))
     return arms
 
 
@@ -331,8 +372,11 @@ def branch_record(tok, fork, base, arm, window, k, seed, cont_ids, finish, stage
     total = fork["pos"] + len(cont_ids)
     truncated = finish == "length" or total >= max_new_tokens
     thinking, _ = split_thinking(text)
-    # Leak check: markers inside the window that was banned.
-    if arm == "ban":
+    # Leak check: banned tokens inside the window that was banned.
+    if arm == "ban" and fork.get("ban_ids"):          # placebo word
+        window_ids = cont_ids if window == "rest" else cont_ids[:stage1_len]
+        leaks = sum(1 for t in window_ids if t in set(fork["ban_ids"]))
+    elif arm == "ban":
         banned_text = thinking if window == "rest" else decode(tok, cont_ids[:stage1_len])
         leaks = sum(count_markers(banned_text).values())
     else:
@@ -342,6 +386,7 @@ def branch_record(tok, fork, base, arm, window, k, seed, cont_ids, finish, stage
         "branch_id": f"{fork['fork_id']}|{arm}-{window}|k{k}",
         "fork_id": fork["fork_id"], "unique_id": fork["unique_id"], "seed": fork["seed"],
         "level": fork["level"], "arm": arm, "window": window, "k": k, "sample_seed": seed,
+        "is_placebo": bool(fork.get("is_placebo")),
         "fork_pos": fork["pos"], "fork_s": fork.get("s"), "gold": base["gold"],
         **grade_output(text, base["gold"]),
         "n_tokens_total": total, "n_tokens_continuation": len(cont_ids),
@@ -382,12 +427,14 @@ def run_branch(engine, tok, forks, bases, out, k_per_arm, window_frac, max_new_t
             # Same seed across arms for continuation k (common random numbers).
             seed = stable_seed("branch", f["fork_id"], k)
             tag = (f, base, arm, window, k, seed, prefix, budget)
+            ban_ids = f.get("ban_ids")      # set only for placebo forks
             if window in ("none", "rest"):
-                one_stage.append(Req(prefix, budget, seed, ban=(arm == "ban"), tag=tag))
+                one_stage.append(Req(prefix, budget, seed, ban=(arm == "ban"), tag=tag,
+                                     ban_ids=ban_ids))
             else:
                 n1 = 1 if window == "token" else min(SENTENCE_STAGE_TOKENS, budget)
-                stage1.append(Req(prefix, n1, seed, ban=True, tag=tag))
-        results = engine.run(one_stage + stage1)
+                stage1.append(Req(prefix, n1, seed, ban=True, tag=tag, ban_ids=ban_ids))
+        results = engine.run(one_stage + stage1, stage="branch")
 
         recs, stage2, pending = [], [], {}
         for res in results:
@@ -411,7 +458,7 @@ def run_branch(engine, tok, forks, bases, out, k_per_arm, window_frac, max_new_t
             pending[key] = (res.req.tag, s1)
             stage2.append(Req(prefix + s1, budget - len(s1), stable_seed(seed, "stage2"),
                               ban=False, tag=key))
-        for res in engine.run(stage2):
+        for res in engine.run(stage2, stage="branch_stage2"):
             (f, base, arm, window, k, seed, prefix, budget), s1 = pending[res.req.tag]
             recs.append(branch_record(tok, f, base, arm, window, k, seed,
                                       s1 + res.token_ids, res.finish_reason, len(s1),
@@ -492,17 +539,17 @@ def main():
     b.add_argument("--levels", default="")
     b.add_argument("--stratify", action="store_true", help="equal share per level")
     b.add_argument("--seeds", default="0,1")
-    b.add_argument("--out", default="runs/baselines.jsonl")
+    b.add_argument("--out", default="runs/main/baselines.jsonl")
 
     br = sub.add_parser("branch")
     common_args(br)
-    br.add_argument("--forks", required=True)
+    br.add_argument("--forks", required=True, help="fork file(s), comma-separated (marker and placebo)")
     br.add_argument("--baselines", required=True)
     br.add_argument("--k", type=int, default=8, help="continuations per arm per fork")
     br.add_argument("--window-frac", type=float, default=0.25,
-                    help="share of forks that also get the token and sentence windows")
+                    help="share of marker forks that also get the next-sentence window")
     br.add_argument("--max-forks", type=int, default=0)
-    br.add_argument("--out", default="runs/branches.jsonl")
+    br.add_argument("--out", default="runs/main/branches.jsonl")
 
     sm = sub.add_parser("smoke")
     common_args(sm)
@@ -513,15 +560,17 @@ def main():
         args.max_new_tokens = 4096          # keep the smoke test short
 
     if args.cmd == "branch":             # check inputs before the slow model load
-        forks = load_input(args.forks)
+        forks = load_inputs(args.forks)
         if args.max_forks:
             forks = forks[:args.max_forks]
         bases = {(r["unique_id"], r["seed"]): r for r in load_input(args.baselines)}
 
     tok = load_tokenizer(args.model)
     ban = MarkerBan(tok)
+    out_dir = args.out_dir if args.cmd == "smoke" else (os.path.dirname(args.out) or ".")
     engine = Engine(tok, ban, args.model, args.ban_impl,
-                    gpu_memory_utilization=args.gpu_mem)
+                    gpu_memory_utilization=args.gpu_mem,
+                    log_path=os.path.join(out_dir, "timing_log.jsonl"))
 
     if args.cmd == "baseline":
         levels = [int(x) for x in args.levels.split(",")] if args.levels else None

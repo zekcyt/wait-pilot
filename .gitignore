@@ -1,7 +1,6 @@
 .venv/
 __pycache__/
-outputs/
-output/
-review*.txt
-*.jsonl
 runs/
+*.jsonl
+.claude/settings.local.json
+docs/*.pdf

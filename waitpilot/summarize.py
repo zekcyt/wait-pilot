@@ -1,15 +1,15 @@
 """
-summarize.py - quick look at outputs/pilot_records.jsonl.
+summarize.py - quick look at runs/calibration/pilot_records.jsonl.
 
-    python summarize.py
-    python summarize.py --show-leaks      # print the context of every leaked marker
+    python -m waitpilot.summarize
+    python -m waitpilot.summarize --show-leaks      # print the context of every leaked marker
 """
 import argparse
 import json
 import sys
 from collections import defaultdict
 
-from common import MARKER_RE   # same pattern pilot.py and the cloud pipeline count with
+from waitpilot.common import MARKER_RE   # same pattern pilot.py and the cloud pipeline count with
 
 
 def load(path):
@@ -28,7 +28,7 @@ def main():
     except Exception:
         pass
     p = argparse.ArgumentParser()
-    p.add_argument("path", nargs="?", default="outputs/pilot_records.jsonl")
+    p.add_argument("path", nargs="?", default="runs/calibration/pilot_records.jsonl")
     p.add_argument("--show-leaks", action="store_true")
     args = p.parse_args()
 

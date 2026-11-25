@@ -1,7 +1,7 @@
 # Cloud pod (Linux, CUDA GPU). vLLM brings its own matching PyTorch.
-# Tested with vLLM 0.34.0. The ban sets SamplingParams._bad_words_token_ids; the
+# Pinned: the pilot ran on vLLM 0.34.0. The ban sets SamplingParams._bad_words_token_ids; the
 # start-up ban check in cloud_generate.py stops the run if a vLLM version ignores it.
-vllm>=0.34
+vllm==0.34.0
 transformers
 datasets
 huggingface_hub

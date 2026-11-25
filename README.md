@@ -1,150 +1,127 @@
 # wait-pilot
 
-A pilot study of what happens to a reasoning model's chain of thought when its "Wait"-style
-re-checking markers are banned during generation.
+What happens to a reasoning model's chain of thought when its "Wait"-style re-checking
+markers are banned during generation? Is a given "Wait" **causal** (it triggers a re-check
+that changes the trace), **stylistic** (the model re-checks anyway with other words), or
+neither?
 
-**Question:** reasoning models like DeepSeek-R1-Distill-Llama-8B often interrupt themselves
-with "Wait", "Hmm" or "Actually" and re-check their work. If those tokens are suppressed at
-decoding time, does the model stop re-checking, re-check with different words, or recover
-from errors less often?
+Model: DeepSeek-R1-Distill-Llama-8B. Problems: MATH-500. The design is in
+`docs/Wait-Pilot Main Run Design Doc.pdf`; the analysis plan in `docs/preregistration*.md`.
 
-Status: local pipeline built and calibrated on a consumer GPU. The main run (full precision,
-rented GPU, long token budget) is still to do.
+Status: pipeline validated on an A100 (smoke test and threshold pilot batch: 100 problems,
+287 forks). Next: exploratory branch run on the pilot forks, then preregistration v2 and
+the main run.
 
-## How it works
+## Layout
 
-Each MATH-500 problem is solved under two conditions with the same random seed:
+```
+README.md, requirements.txt (local), requirements-cloud.txt (GPU pod)
+docs/        design doc, preregistration v1, v2 draft
+waitpilot/   the experiment code (one Python package)
+tools/       standalone helpers (environment check, 4-bit model copy, response viewer)
+runs/        all data and results (not in git)
+  calibration/  local Hugging Face runs (pilot.py)
+  smoke/        pipeline test on the pod
+  pilot/        threshold pilot batch and the exploratory branch run
+  main/         main run (default output location)
+  reviews/      text dumps for reading traces by hand
+```
 
-| Condition | What happens |
-|---|---|
-| `baseline` | normal sampling |
-| `suppress` | the logits of every marker token (`Wait`, ` wait`, `Hmm`, `Actually`, ...) are set to -inf |
+| Module (`waitpilot/`) | Purpose | Runs on |
+|---|---|---|
+| `common.py` | settings, marker ban (incl. split spellings like "H"+"mmm"), fork detection | both |
+| `grading.py` | answer grading: every box in the final section, sets vs ordered tuples, math-verify | both |
+| `cloud_generate.py` | vLLM generation: baselines, branches (free / banned / placebo arms), smoke test | pod |
+| `probes.py` | forced-answer probes: fork state s, placebo forks, threshold check, branch probes | pod |
+| `analyze.py` | effect estimates (length primary), marker vs placebo, absorption, spread; figures | local |
+| `regrade.py` | regrade any records file offline | local |
+| `pilot.py` | original local experiment with Hugging Face transformers (8 GB GPU, 4-bit) | local |
+| `summarize.py`, `inspect_records.py` | quick tables and readable views of `pilot.py` records | local |
 
-The only difference between conditions is the ban. Sampling (temperature 0.6, top-p 0.95)
-runs in one logits processor after the ban, so the order is fixed.
-
-`--suppress-from paragraph` leaves the opening paragraph unbanned, so paired runs share the
-model's usual opening ("Hmm, let me think about how to approach this.") and first diverge at
-the first marker that would have appeared mid-reasoning.
-
-Each run is saved as one JSON line: the raw output, the predicted and correct answers,
-whether it was truncated, and marker and substitute-phrase counts.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `pilot.py` | local (Hugging Face) experiment; writes records to a `.jsonl` file |
-| `common.py` | shared settings, marker ban (incl. split spellings like "H"+"mmm"), fork detection |
-| `grading.py` | answer grading: every box in the final section, sets vs ordered tuples, math-verify |
-| `regrade.py` | regrades any records file offline with `grading.py` |
-| `cloud_generate.py` | vLLM main run: baselines, branches (free / banned arms, ban windows), smoke test |
-| `probes.py` | forced-answer probes: fork state s, threshold check, probes along branches |
-| `summarize.py` | accuracy, truncation, marker counts, paired comparison, leak check |
-| `inspect_records.py` | readable side-by-side view of each problem for manual review |
-| `smoke_test.py` | one-prompt check that the model loads and generates |
-| `save_4bit.py` | saves a pre-quantized 4-bit copy of the model (low-memory local loading) |
+Run everything **from the repository root** as a module: `python -m waitpilot.<module> ...`.
 
 ## Setup
 
-Python 3.11 or 3.12. Install PyTorch first, using the CUDA build for your machine
-(copy the command from https://pytorch.org/get-started/locally/), then:
+Python 3.11 or 3.12.
+
+**Local** (analysis, and `pilot.py` on a consumer GPU): install PyTorch with the CUDA build
+for your machine (https://pytorch.org/get-started/locally/), then
 
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-Download the model once (about 16 GB, MIT licensed, no gating):
-
-```bash
-hf download deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-```
-
-### Local, 8 GB GPU (4-bit)
-
-Loading the full model and quantizing on the fly needs a lot of system memory. Save a 4-bit
-copy once, then load that:
-
-```bash
-python save_4bit.py
-python pilot.py --model F:/models/r1-distill-llama-8b-nf4 --limit 5
-```
-
-Edit `DST` in `save_4bit.py` to choose where the copy goes. Local runs are for checking the
-pipeline. Use full precision for real numbers.
-
-### Cloud main run (vLLM, BF16, A100 80GB)
-
-The main run follows the design doc and `docs/preregistration.md`. On the pod:
+**GPU pod** (Linux): vLLM brings its own PyTorch, pinned to the version the pilot ran on.
 
 ```bash
 python -m pip install -r requirements-cloud.txt
-python cloud_generate.py smoke                         # must print SMOKE TEST PASSED
-
-# threshold pilot batch: baselines + fork probes only, no branches
-python cloud_generate.py baseline --limit 100 --stratify --seeds 0 --out runs/pilot_baselines.jsonl
-python probes.py forks --baselines runs/pilot_baselines.jsonl --out runs/pilot_forks.jsonl
-python probes.py threshold runs/pilot_forks.jsonl      # fork counts per group, no effects
-
-# after locking the threshold and tagging preregistration v2:
-python cloud_generate.py baseline --seeds 0,1 --out runs/baselines.jsonl
-python probes.py forks --baselines runs/baselines.jsonl --out runs/forks.jsonl
-python cloud_generate.py branch --forks runs/forks.jsonl --baselines runs/baselines.jsonl --out runs/branches.jsonl
-python probes.py branch --branches runs/branches.jsonl --forks runs/forks.jsonl --baselines runs/baselines.jsonl --out runs/branch_probes.jsonl
+hf download deepseek-ai/DeepSeek-R1-Distill-Llama-8B      # about 16 GB, not gated
 ```
 
-Every step resumes where it stopped. Token IDs are saved with every record, so fork
-prefixes are rebuilt exactly. Every command starts with a greedy ban check and stops if
-the ban has no effect. The default `--ban-impl ids` passes the exact ban rule to vLLM as
-token sequences; `--ban-impl words` is a fallback that misses some split spellings.
-
-## Usage
+## Running on the pod
 
 ```bash
-# check which token IDs will be banned (tokenizer only, no GPU)
-python pilot.py --scan-markers
-
-# example calibration run: hard problems, 2 seeds, opening paragraph left alone
-python pilot.py --model <model> --levels 4,5 --limit 15 --seeds 0,1 \
-    --suppress-from paragraph --out outputs/calib_l45_para.jsonl
-
-python summarize.py outputs/calib_l45_para.jsonl --show-leaks
-python inspect_records.py outputs/calib_l45_para.jsonl > review.txt
+python -m waitpilot.cloud_generate smoke                  # must print SMOKE TEST PASSED
 ```
 
-| Option | Meaning |
-|---|---|
-| `--model` | model name or local path (a pre-quantized folder is detected automatically) |
-| `--quantize` | `4bit`, `8bit` or `none` (default) |
-| `--limit` | number of problems (fixed shuffle, so small runs are prefixes of larger ones) |
-| `--levels` | only these MATH difficulty levels, e.g. `4,5` |
-| `--seeds` | comma-separated seeds; every problem is run once per seed and condition |
-| `--max-new-tokens` | generation cap; runs that hit it are marked `truncated` |
-| `--suppress-from` | `start` or `paragraph` |
-| `--out` | output file. Re-running the same command resumes and skips finished runs |
+**Threshold pilot batch** (done): baselines and fork probes only.
 
-An output file can only hold records made with the same model, token cap and
-`--suppress-from`; `pilot.py` refuses to mix them.
+```bash
+python -m waitpilot.cloud_generate baseline --limit 100 --stratify --seeds 0 --out runs/pilot/pilot_baselines.jsonl
+python -m waitpilot.probes forks --baselines runs/pilot/pilot_baselines.jsonl --out runs/pilot/pilot_forks.jsonl
+python -m waitpilot.probes threshold runs/pilot/pilot_forks.jsonl
+```
 
-## Reading the results
+**Exploratory branch run on the pilot forks**: marker arms plus matched placebo words.
 
-- `acc` counts truncated runs as wrong; `acc_fin` is accuracy on runs that finished.
-- Truncated runs have no final answer, so judge accuracy on finished runs.
-- `substitute_counts` tracks phrases like "Alternatively" and "Let me check", to see whether
-  the model re-checks with different words once the markers are banned.
-- Grading (`grading.py`) parses every `\boxed{}` in the final section. A gold comma list
-  such as `-2,1` is compared as a set, so `\boxed{1}, \boxed{-2}` is correct; bracketed
-  answers such as `(3, \frac{\pi}{2})` keep their order. Equivalence uses math-verify.
-  Records made before this grader can be regraded with `regrade.py`.
+```bash
+python -m waitpilot.probes placebo --baselines runs/pilot/pilot_baselines.jsonl --forks runs/pilot/pilot_forks.jsonl --out runs/pilot/pilot_placebo.jsonl
+python -m waitpilot.cloud_generate branch --forks runs/pilot/pilot_forks.jsonl,runs/pilot/pilot_placebo.jsonl --baselines runs/pilot/pilot_baselines.jsonl --out runs/pilot/pilot_branches.jsonl
+python -m waitpilot.probes branch --branches runs/pilot/pilot_branches.jsonl --forks runs/pilot/pilot_forks.jsonl,runs/pilot/pilot_placebo.jsonl --baselines runs/pilot/pilot_baselines.jsonl --out runs/pilot/pilot_branch_probes.jsonl --probe-every 3
+```
 
-## Notes on local runs
+**Main run** (after preregistration v2 is tagged): the same steps without `--limit`, two
+seeds, outputs under `runs/main/` (the defaults).
 
-Hard problems need more reasoning tokens than an 8 GB card can handle at a usable speed:
-runs slow down sharply near 3,000 tokens, and most hard-problem runs are truncated.
-Easy problems finish in 1-3 minutes. Quantitative results should come from the full-precision
-run with a large token cap.
+Every step resumes where it stopped. Every command starts with a greedy ban check and stops
+if the ban has no effect (`--ban-impl ids`, the default, passes the exact ban rule to vLLM as
+token sequences). Every vLLM call is logged to `timing_log.jsonl` next to the output file:
+stage, requests, tokens, seconds and tokens per second. Token IDs are saved with every
+record, so fork prefixes are rebuilt exactly, and every record carries the git commit it was
+made with (`code_version`).
 
-## Status of the cloud code
+## Analysis (local, no GPU)
 
-`cloud_generate.py` and `probes.py` were dry-run locally with a fake engine (no vLLM on
-Windows). The smoke test on the pod is the real check.
+```bash
+python -m waitpilot.analyze --forks runs/pilot/pilot_forks.jsonl,runs/pilot/pilot_placebo.jsonl --branches runs/pilot/pilot_branches.jsonl --branch-probes runs/pilot/pilot_branch_probes.jsonl --out-dir runs/pilot/analysis --label exploratory
+```
+
+Writes `report.txt`, `summary.json`, `per_fork.csv` and figures. Length (total tokens) is
+the primary outcome; a negative effect means the ban shortens the trace. Intervals are 95%
+cluster-bootstrap intervals over problems.
+
+## Local experiment (`pilot.py`, consumer GPU)
+
+The original pilot: each problem is solved twice with the same seed, once normally and once
+with every marker token banned. `--suppress-from paragraph` leaves the opening paragraph
+unbanned so paired runs share it.
+
+```bash
+python -m waitpilot.pilot --scan-markers                 # which tokens are banned (no GPU)
+python tools/save_4bit.py                                # once: 4-bit copy for an 8 GB card
+python -m waitpilot.pilot --model F:/models/r1-distill-llama-8b-nf4 --levels 4,5 --limit 15 \
+    --seeds 0,1 --suppress-from paragraph --out runs/calibration/calib_l45_para.jsonl
+python -m waitpilot.summarize runs/calibration/calib_l45_para.jsonl --show-leaks
+python -m waitpilot.inspect_records runs/calibration/calib_l45_para.jsonl > runs/reviews/review.txt
+```
+
+An output file only holds records made with the same model, token cap, `--suppress-from`
+and ban version; `pilot.py` refuses to mix them. Local 4-bit runs are for checking the
+pipeline: hard problems slow down sharply near 3,000 tokens on an 8 GB card.
+
+## Grading
+
+`grading.py` parses every `\boxed{}` in the final section. A gold comma list such as `-2,1`
+is compared as a set, so `\boxed{1}, \boxed{-2}` is correct; bracketed answers such as
+`(3, \frac{\pi}{2})` keep their order. Equivalence uses math-verify, OR a strict string and
+number match. Older records can be regraded with `python -m waitpilot.regrade <file>`.

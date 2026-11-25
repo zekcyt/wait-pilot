@@ -5,9 +5,9 @@ regrade.py - offline regrading of any records file that has "output" and "gold"
 Uses grading.py: every box in the final section, sets compared order-insensitively,
 bracketed answers keep their order, math-verify equivalence (pip install math-verify).
 
-    python regrade.py outputs/calib_l123_para.jsonl
-    python regrade.py outputs/calib_l123_para.jsonl --out outputs/calib_l123_para.regraded.jsonl
-    python regrade.py runs/branches.jsonl --in-place
+    python -m waitpilot.regrade runs/calibration/calib_l123_para.jsonl
+    python -m waitpilot.regrade runs/calibration/calib_l123_para.jsonl --out runs/calibration/calib_l123_para.regraded.jsonl
+    python -m waitpilot.regrade runs/main/branches.jsonl --in-place
 
 The original grade is kept as correct_old / pred_old, so nothing is lost. Prints every
 record whose grade changed, for a manual check.
@@ -17,7 +17,7 @@ import json
 import os
 import sys
 
-from grading import GRADER_VERSION, HAVE_MATH_VERIFY, grade_output
+from waitpilot.grading import GRADER_VERSION, HAVE_MATH_VERIFY, grade_output
 
 
 def main():

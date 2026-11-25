@@ -1,8 +1,8 @@
 """
 inspect_records.py - readable side-by-side view of pilot_records.jsonl for manual review.
 
-    python inspect_records.py > review.txt        # then open review.txt in VS Code
-    python inspect_records.py --uid test/algebra/1234.json
+    python -m waitpilot.inspect_records > review.txt        # then open review.txt in VS Code
+    python -m waitpilot.inspect_records --uid test/algebra/1234.json
 """
 import argparse
 import json
@@ -35,7 +35,7 @@ def main():
     except Exception:
         pass
     p = argparse.ArgumentParser()
-    p.add_argument("path", nargs="?", default="outputs/pilot_records.jsonl")
+    p.add_argument("path", nargs="?", default="runs/calibration/pilot_records.jsonl")
     p.add_argument("--uid", help="only this problem")
     p.add_argument("--tail", type=int, default=800,
                    help="characters of the end of each output to show")
