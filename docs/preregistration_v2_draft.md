@@ -64,7 +64,7 @@ Headline: every fork counts equally. Check: average per problem. Both are report
 
 ## Pilot batch (counts only)
 
-Code commit `85a8ddd`. 100 baseline traces (20 per level) and 287 forks.
+Code commit `0e4584d` (recorded as `85a8ddd` before the history rewrite; see docs/commit_id_map.md). 100 baseline traces (20 per level) and 287 forks.
 
 - Accuracy 94%, 1% truncated, mean 3,208 tokens per trace.
 - Forks: 121 below (42%), 7 at (2%), 159 above (55%). 256 of 287 have s of exactly 0 or 1.
