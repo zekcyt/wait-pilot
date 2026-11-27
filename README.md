@@ -1,6 +1,6 @@
 | Location     | Description                     | Link                                                                                             |
 |--------------|---------------------------------|--------------------------------------------------------------------------------------------------|
-| GitHub       | Code, Data, Preregs, decisions | https://github.com/zekcyt/wait-pilot/edit/main/README.md                                         |
+| GitHub       | Code, Data, Preregs, decisions | https://github.com/zekcyt/wait-pilot                                      |
 | Google Docs  | Paper draft                     | https://docs.google.com/document/d/11Jt1lnb-IgHGP_uFhjyfHVoC4j_dLsopbF9doPSqDCg/edit?usp=sharing |
 | Google Drive | Organization of Docs            | https://drive.google.com/drive/folders/1daVu0iCOdzMr6zL2U1MVWc_WfYgM4b0L?usp=sharing             |
 
